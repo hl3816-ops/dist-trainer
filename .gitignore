@@ -5,3 +5,4 @@ __pycache__/
 *.pt
 .cache/
 kaggle_kernel/output/
+kaggle_kernel/gpu_extras/output/

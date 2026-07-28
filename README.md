@@ -12,8 +12,8 @@ Four capabilities, four pieces of concrete evidence:
 
 | Capability | Where it's proven |
 |---|---|
-| Distributed training that's actually correct, not just "runs" | [`tests/test_correctness.py`](tests/test_correctness.py) -- 4-process DDP vs. single-process baseline, final weights match to **5.96e-08** |
-| Reusable framework, not a one-off script | [`dist_trainer/trainer.py`](dist_trainer/trainer.py) -- domain-agnostic `Trainer` (DDP, AMP, checkpointing); both the toy-MLP and the transformer example plug into the same ~150-line class |
+| Distributed training that's actually correct, not just "runs" | [`tests/test_correctness.py`](tests/test_correctness.py) -- 4-process DDP vs. single-process baseline (CPU/gloo), final weights match to **5.96e-08**; re-verified on real 2x T4 GPUs (NCCL) at **1.19e-07**, see below |
+| Reusable framework, not a one-off script | [`dist_trainer/trainer.py`](dist_trainer/trainer.py) -- domain-agnostic `Trainer` (DDP or FSDP, AMP, checkpointing); both the toy-MLP and the transformer example plug into the same ~170-line class |
 | Reliability under failure ("robust under rapid iteration") | [`tests/test_fault_tolerance.py`](tests/test_fault_tolerance.py) -- kill the process mid-training, resume from checkpoint, **zero** loss trajectory divergence (0.00e+00) vs. an uninterrupted run |
 | High-performance optimization (real GPU numbers) | [`kaggle_kernel/benchmark_kernel.py`](kaggle_kernel/benchmark_kernel.py), run on real 2x T4 GPUs -- mixed precision: **2.6x** throughput; gradient checkpointing: **68% less** peak memory; 2 GPUs vs 1: **1.79x** throughput. See "Real GPU benchmark results" below. |
 
@@ -31,9 +31,11 @@ examples/
   gpt_data.py                  character-level tiny-shakespeare data loading
   benchmark_gpt.py            throughput/memory benchmark CLI (single or multi-GPU via torchrun)
 
-kaggle_kernel/            <- self-contained script + metadata to run the same
-  benchmark_kernel.py        benchmark on real Kaggle GPUs (inlines model/data/
-  kernel-metadata.json       training code so the push is a single self-sufficient file)
+kaggle_kernel/            <- self-contained scripts + metadata to run on real Kaggle GPUs
+  benchmark_kernel.py         AMP / grad-checkpoint throughput+memory matrix (1 & 2 GPU)
+  gpu_extras/
+    gpu_extras_kernel.py       DDP-vs-single-process correctness on NCCL, and FSDP vs DDP
+  (each inlines its own model/data/training code so the push is one self-sufficient file)
 
 tests/
   test_correctness.py        DDP vs. single-process weight equivalence check
@@ -41,9 +43,13 @@ tests/
 ```
 
 The `Trainer` reads `RANK` / `WORLD_SIZE` from the environment and only
-wraps the model in DDP when `WORLD_SIZE > 1` -- the exact same `train.py`
+wraps the model when `WORLD_SIZE > 1` -- the exact same `train.py`
 runs unmodified single-process (`python examples/train.py`) or distributed
-(`torchrun --nproc_per_node=N examples/train.py`).
+(`torchrun --nproc_per_node=N examples/train.py`). Pass
+`trainer.setup(parallelism="fsdp")` instead of the default `"ddp"` to shard
+parameters/gradients/optimizer state across ranks instead of replicating
+the full model on each one (checkpointing an FSDP-wrapped `Trainer` isn't
+supported yet -- see limitations).
 
 ## Quickstart
 
@@ -100,6 +106,33 @@ Reading the table:
   faster than that baseline -- the useful combination when memory is the binding
   constraint and you still want throughput back via more GPUs.
 
+## GPU correctness, and FSDP vs. DDP
+
+`kaggle_kernel/gpu_extras/gpu_extras_kernel.py`, same 2x T4 setup:
+
+**DDP correctness on NCCL** (not just CPU/gloo): 2-process DDP vs. single-process,
+30 steps, same TinyGPT config -- final weights match to **1.19e-07** max abs
+difference. Same invariant as `tests/test_correctness.py`, now verified on the
+actual backend (NCCL) and hardware (GPU) real training uses, not just the
+portable CPU stand-in.
+
+**FSDP vs. DDP** (2 GPUs, AdamW, no AMP/checkpointing, 30 steps):
+
+| Parallelism | Samples/sec | Peak memory (MB) |
+|---|---:|---:|
+| DDP | 666.3 | 919.0 |
+| FSDP | 648.4 | **852.5** |
+
+FSDP used **7.2% less peak memory** than DDP for **2.7% less throughput** (the
+cost of the extra all-gather to reconstruct full parameters on the fly). That's
+a real but modest difference at this model's size (~11M params) -- FSDP's
+memory advantage comes from *not* replicating optimizer state (2x the
+parameter count for AdamW's momentum + variance) on every rank, which only
+becomes a large fraction of peak memory once the model itself is big enough
+that optimizer state, not activations, dominates. At 11M params it's already
+measurable; at the scale DDP actually stops fitting on a single GPU, the same
+mechanism is why FSDP (or ZeRO) is the default choice instead.
+
 ## A real bug found along the way
 
 `torchrun`'s built-in rendezvous bootstrap creates its own `TCPStore`
@@ -139,8 +172,11 @@ running on Kaggle, in case they save someone else the debugging time:
   etc.) -- the common real-world setup, but worth stating explicitly.
 - **Still single-node (2 GPUs, 1 machine) and a small model (~11M params).**
   This demonstrates the mechanics and the direction/magnitude of each
-  optimization correctly, but the specific numbers won't generalize to
-  multi-node training or to models where activation memory, not the model
-  itself, dominates -- that's where sharding techniques like FSDP/ZeRO
-  (not implemented here) start to matter more than DDP + gradient
-  checkpointing.
+  optimization correctly, but the specific numbers -- including the modest
+  7.2% FSDP memory win -- won't generalize as-is to multi-node training or to
+  much larger models, where FSDP's advantage over DDP grows substantially
+  (see "GPU correctness, and FSDP vs. DDP" above).
+- **FSDP checkpointing isn't implemented.** `dist_trainer/checkpoint.py`
+  assumes a plain or DDP-wrapped model's `state_dict()`; FSDP's is sharded
+  by default and needs an explicit `state_dict_type` context to gather a
+  full checkpoint, which this library doesn't do yet.

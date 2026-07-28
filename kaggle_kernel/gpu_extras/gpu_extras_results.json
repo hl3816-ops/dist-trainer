@@ -1,0 +1,22 @@
+{
+  "gpu_correctness": {
+    "max_abs_weight_diff": 1.1920928955078125e-07,
+    "passed": true,
+    "backend": "nccl",
+    "steps": 30
+  },
+  "fsdp_vs_ddp": [
+    {
+      "parallelism": "ddp",
+      "elapsed_seconds": 2.882,
+      "samples_per_sec": 666.3,
+      "peak_cuda_memory_mb": 919.0
+    },
+    {
+      "parallelism": "fsdp",
+      "elapsed_seconds": 2.961,
+      "samples_per_sec": 648.4,
+      "peak_cuda_memory_mb": 852.5
+    }
+  ]
+}

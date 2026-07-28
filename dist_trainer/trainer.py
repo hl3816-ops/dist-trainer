@@ -45,10 +45,31 @@ class Trainer:
         self.amp_dtype = amp_dtype
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
-    def setup(self, backend: str = "gloo") -> None:
+    def setup(self, backend: str = "gloo", parallelism: str = "ddp") -> None:
+        """`parallelism="ddp"` (default) replicates the full model on every
+        rank. `parallelism="fsdp"` shards parameters/gradients/optimizer
+        state across ranks instead -- more setup cost, but the technique
+        that actually matters once a model is too big for DDP's "one full
+        copy per GPU" to fit in memory.
+
+        Note: checkpoint.py's save/load assumes a plain or DDP-wrapped
+        model's state_dict; it does NOT yet handle FSDP's sharded
+        state_dict (which needs an explicit state_dict_type context to
+        gather a full checkpoint). Checkpointing an FSDP-wrapped Trainer
+        will not work correctly -- this is a known gap, not a silent bug.
+        """
+        if parallelism not in ("ddp", "fsdp"):
+            raise ValueError(
+                f"parallelism must be 'ddp' or 'fsdp', got {parallelism!r}"
+            )
         if self.distributed:
             dist.init_process_group(backend=backend)
-            self.model = DDP(self.model)
+            if parallelism == "fsdp":
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+                self.model = FSDP(self.model)
+            else:
+                self.model = DDP(self.model)
         self._is_setup = True
 
     def teardown(self) -> None:

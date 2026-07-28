@@ -1,0 +1,15 @@
+{
+  "id": "nick999888/dist-trainer-gpu-correctness-and-fsdp-vs-ddp",
+  "title": "dist-trainer GPU correctness and FSDP vs DDP",
+  "code_file": "gpu_extras_kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
