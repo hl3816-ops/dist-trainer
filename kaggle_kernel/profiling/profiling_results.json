@@ -1,0 +1,138 @@
+{
+  "ddp": {
+    "parallelism": "ddp",
+    "total_cuda_time_us": 39329218.66899987,
+    "comm_cuda_time_us": 9135130.56,
+    "comm_pct_of_total": 23.23,
+    "top_ops": [
+      {
+        "op": "Command Buffer Full",
+        "cuda_time_us": 4584450.805999979,
+        "is_comm": false
+      },
+      {
+        "op": "record_param_comms",
+        "cuda_time_us": 4567565.28,
+        "is_comm": false
+      },
+      {
+        "op": "ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
+        "cuda_time_us": 4566451.278999999,
+        "is_comm": true
+      },
+      {
+        "op": "nccl:all_reduce",
+        "cuda_time_us": 4566451.278999999,
+        "is_comm": true
+      },
+      {
+        "op": "aten::mm",
+        "cuda_time_us": 4158840.188999979,
+        "is_comm": false
+      },
+      {
+        "op": "DistributedDataParallel.forward",
+        "cuda_time_us": 2607456.9919999987,
+        "is_comm": false
+      },
+      {
+        "op": "aten::addmm",
+        "cuda_time_us": 2215003.610999996,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x128_tn",
+        "cuda_time_us": 1455976.1979999936,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x64_nn",
+        "cuda_time_us": 1426379.2699999963,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x128_nt",
+        "cuda_time_us": 1367818.0979999949,
+        "is_comm": false
+      },
+      {
+        "op": "Optimizer.step#AdamW.step",
+        "cuda_time_us": 818172.4499999993,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x64_tn",
+        "cuda_time_us": 798928.788999994,
+        "is_comm": false
+      }
+    ]
+  },
+  "fsdp": {
+    "parallelism": "fsdp",
+    "total_cuda_time_us": 28901879.07599994,
+    "comm_cuda_time_us": 5351812.007999994,
+    "comm_pct_of_total": 18.52,
+    "top_ops": [
+      {
+        "op": "aten::mm",
+        "cuda_time_us": 4197848.524000008,
+        "is_comm": false
+      },
+      {
+        "op": "FullyShardedDataParallel.forward",
+        "cuda_time_us": 2695661.933000001,
+        "is_comm": false
+      },
+      {
+        "op": "record_param_comms",
+        "cuda_time_us": 2675906.003999997,
+        "is_comm": false
+      },
+      {
+        "op": "aten::addmm",
+        "cuda_time_us": 2312865.3010000032,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x128_tn",
+        "cuda_time_us": 1520716.8619999941,
+        "is_comm": false
+      },
+      {
+        "op": "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
+        "cuda_time_us": 1457738.2640000002,
+        "is_comm": true
+      },
+      {
+        "op": "nccl:_all_gather_base",
+        "cuda_time_us": 1457738.2640000002,
+        "is_comm": true
+      },
+      {
+        "op": "volta_sgemm_128x64_nn",
+        "cuda_time_us": 1448273.7370000035,
+        "is_comm": false
+      },
+      {
+        "op": "volta_sgemm_128x128_nt",
+        "cuda_time_us": 1373673.647000005,
+        "is_comm": false
+      },
+      {
+        "op": "ncclDevKernel_ReduceScatter_Sum_f32_RING_LL(ncclDevKernelArgsStorage<4096ul>)",
+        "cuda_time_us": 1218167.7399999965,
+        "is_comm": true
+      },
+      {
+        "op": "nccl:_reduce_scatter_base",
+        "cuda_time_us": 1218167.7399999965,
+        "is_comm": true
+      },
+      {
+        "op": "Command Buffer Full",
+        "cuda_time_us": 1031801.8000000212,
+        "is_comm": false
+      }
+    ]
+  }
+}

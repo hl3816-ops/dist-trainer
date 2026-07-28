@@ -1,0 +1,15 @@
+{
+  "id": "nick999888/dist-trainer-profiling-ddp-vs-fsdp",
+  "title": "dist-trainer profiling DDP vs FSDP",
+  "code_file": "profile_kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

@@ -139,6 +139,52 @@ savings do. This is the honest trade, not a free lunch -- FSDP wins on models
 too big for DDP to fit at all, not universally. (~303M params is still far
 below what "large model" means in the industry -- see limitations below.)
 
+## What's actually inside that communication cost: a profiler trace
+
+The numbers above say *how much* FSDP's communication overhead costs; they
+don't say *what it's actually doing*. `kaggle_kernel/profiling/profile_kernel.py`
+wraps a few training steps of each strategy (303M-param config, 2 GPUs) in
+`torch.profiler` and reports the real CUDA kernels, not an inference from
+throughput deltas:
+
+| Parallelism | Communication ops | % of CUDA time |
+|---|---|---:|
+| DDP | `ncclDevKernel_AllReduce` only | 23.2% |
+| FSDP | `ncclDevKernel_AllGather` + `ncclDevKernel_ReduceScatter` | 18.5% |
+
+This is the mechanistic confirmation of why the two strategies have different
+costs: DDP does exactly one kind of communication per step (all-reduce the
+full gradient). FSDP does two -- all-gather the full parameters back together
+before forward/backward (since it only stores a shard at rest), then reduce-
+scatter the gradients back into shards afterward. Two collective calls
+instead of one is the concrete mechanism behind FSDP's extra overhead, not
+just an abstract "sharding has a cost."
+
+**Caveat that matters**: the profiler's own instrumentation isn't free --
+per-step time under `torch.profiler` here was ~4x slower than the same config
+measured cleanly in the un-instrumented benchmark above (profiling records
+every op and its call stack, which is itself GPU/CPU work). So the *absolute*
+times in this table shouldn't be compared against the throughput numbers
+elsewhere in this README -- only the *relative* communication-vs-compute
+split and the *identity* of which kernels are running are meaningful here.
+Conflating "what a profiler measures" with "what actually happens
+unobserved" is exactly the kind of mistake that produces wrong conclusions
+from real profiling data, so it's worth stating explicitly rather than
+leaving it implicit.
+
+## Scaling beyond one node
+
+Everything above was measured on a single machine. [`MULTI_NODE_DESIGN.md`](MULTI_NODE_DESIGN.md)
+is a technical design document (not a validated result -- no multi-node
+hardware was available to test on) covering what would actually have to
+change: rendezvous/launcher config across real hosts, NCCL transport
+selection and why intra- vs. inter-node bandwidth asymmetry is the real
+scaling bottleneck, gradient bucketing/overlap tuning, fault recovery when
+node failure stops being an edge case, and sharded/async checkpointing and
+streaming data loading at a scale where this repo's simplifications
+(single-file synchronous checkpoints, one small in-memory dataset) stop
+being fine.
+
 ## A real bug found along the way
 
 `torchrun`'s built-in rendezvous bootstrap creates its own `TCPStore`
