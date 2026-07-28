@@ -2,10 +2,18 @@
 
 Everything in this repo has been built and measured on a single machine (2
 GPUs, one process group, one network namespace). This document is a design
-analysis, not a validated result: what would actually have to change to run
-this `Trainer` across multiple nodes, and why -- written up as a technical
-report rather than left as an unstated assumption, since I don't have
-multi-node hardware to test it on directly.
+analysis of what would actually have to change to run this `Trainer` across
+multiple nodes, and why -- written up as a technical report rather than left
+as an unstated assumption.
+
+A real 2-node run was attempted on two separate RunPod instances
+([`multinode/multinode_test.py`](multinode/multinode_test.py)): rendezvous
+(`TCPStore` over an SSH tunnel) worked end-to-end, but gloo's full-mesh
+data-plane connection was blocked by the cloud provider's container
+networking (no `CAP_NET_ADMIN`, SSH-only port exposure between pods) --
+see the README's "Scaling beyond one node" section for the precise
+root cause. The launcher/rendezvous design below is otherwise unvalidated
+on real multi-node hardware for the data-plane path specifically.
 
 ## What's already node-count-agnostic
 
