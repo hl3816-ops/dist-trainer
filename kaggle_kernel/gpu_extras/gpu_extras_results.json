@@ -5,18 +5,38 @@
     "backend": "nccl",
     "steps": 30
   },
-  "fsdp_vs_ddp": [
-    {
-      "parallelism": "ddp",
-      "elapsed_seconds": 2.882,
-      "samples_per_sec": 666.3,
-      "peak_cuda_memory_mb": 919.0
-    },
-    {
-      "parallelism": "fsdp",
-      "elapsed_seconds": 2.961,
-      "samples_per_sec": 648.4,
-      "peak_cuda_memory_mb": 852.5
-    }
-  ]
+  "fsdp_vs_ddp": {
+    "small_11M": [
+      {
+        "parallelism": "ddp",
+        "elapsed_seconds": 2.844,
+        "samples_per_sec": 675.2,
+        "peak_cuda_memory_mb": 919.0,
+        "num_params_approx": 10746624
+      },
+      {
+        "parallelism": "fsdp",
+        "elapsed_seconds": 2.995,
+        "samples_per_sec": 641.1,
+        "peak_cuda_memory_mb": 852.5,
+        "num_params_approx": 10746624
+      }
+    ],
+    "big_300M": [
+      {
+        "parallelism": "ddp",
+        "elapsed_seconds": 34.427,
+        "samples_per_sec": 27.9,
+        "peak_cuda_memory_mb": 8561.7,
+        "num_params_approx": 302575616
+      },
+      {
+        "parallelism": "fsdp",
+        "elapsed_seconds": 45.399,
+        "samples_per_sec": 21.1,
+        "peak_cuda_memory_mb": 6748.1,
+        "num_params_approx": 302575616
+      }
+    ]
+  }
 }

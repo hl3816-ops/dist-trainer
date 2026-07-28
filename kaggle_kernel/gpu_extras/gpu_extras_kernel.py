@@ -34,9 +34,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # Data + model (same as benchmark_kernel.py)
 # ---------------------------------------------------------------------------
 
-TINYSHAKESPEARE_URL = (
-    "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-)
+TINYSHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
 
 def load_text() -> str:
@@ -64,7 +62,9 @@ def make_batch_iter(data, block_size, total_batch_size, seed=0):
     def batch_iter(step, rank, world_size):
         shard_size = total_batch_size // world_size
         gen = torch.Generator().manual_seed(seed * 1_000_003 + step)
-        starts = torch.randint(0, n - block_size - 1, (total_batch_size,), generator=gen)
+        starts = torch.randint(
+            0, n - block_size - 1, (total_batch_size,), generator=gen
+        )
         my_starts = starts[rank * shard_size : (rank + 1) * shard_size]
         x = torch.stack([data[s : s + block_size] for s in my_starts])
         y = torch.stack([data[s + 1 : s + 1 + block_size] for s in my_starts])
@@ -82,13 +82,17 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(n_embd, n_embd)
         self.register_buffer(
             "causal_mask",
-            torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size),
+            torch.tril(torch.ones(block_size, block_size)).view(
+                1, 1, block_size, block_size
+            ),
             persistent=False,
         )
 
     def forward(self, x):
         b, t, c = x.shape
-        qkv = self.qkv(x).view(b, t, 3, self.n_head, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv = (
+            self.qkv(x).view(b, t, 3, self.n_head, self.head_dim).permute(2, 0, 3, 1, 4)
+        )
         q, k, v = qkv[0], qkv[1], qkv[2]
         att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         att = att.masked_fill(self.causal_mask[:, :, :t, :t] == 0, float("-inf"))
@@ -127,7 +131,9 @@ class TinyGPT(nn.Module):
         self.block_size = block_size
         self.tok_emb = nn.Embedding(vocab_size, n_embd)
         self.pos_emb = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(n_layer)])
+        self.blocks = nn.ModuleList(
+            [Block(n_embd, n_head, block_size) for _ in range(n_layer)]
+        )
         self.ln_f = nn.LayerNorm(n_embd)
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
         self.apply(self._init_weights)
@@ -159,8 +165,18 @@ STEPS = 30
 WARMUP = 5
 TOTAL_BATCH_SIZE = 64
 BLOCK_SIZE = 128
-N_LAYER, N_HEAD, N_EMBD = 6, 6, 384
+N_LAYER, N_HEAD, N_EMBD = 6, 6, 384  # used by the correctness check ("small")
 SEED = 0
+
+# Model sizes for the FSDP-vs-DDP comparison, to show the trend (not just one
+# data point): "small" is the same ~11M-param config used everywhere else in
+# this repo; "big" is as large as comfortably fits DDP's full-replica memory
+# on a single 16GB T4 (~300M params, GPT-2-small/medium-ish depth/width).
+# Still nowhere near an industry "large model" -- see README for that caveat.
+MODEL_CONFIGS = {
+    "small_11M": {"n_layer": 6, "n_head": 6, "n_embd": 384, "total_batch_size": 64},
+    "big_300M": {"n_layer": 24, "n_head": 16, "n_embd": 1024, "total_batch_size": 32},
+}
 
 
 def _load_data():
@@ -187,7 +203,9 @@ def _train_and_get_state(rank, world_size, device, holder, wrap_ddp):
     torch.manual_seed(SEED)
     tokenizer, data = _load_data()
 
-    model = TinyGPT(tokenizer.vocab_size, BLOCK_SIZE, N_LAYER, N_HEAD, N_EMBD).to(device)
+    model = TinyGPT(tokenizer.vocab_size, BLOCK_SIZE, N_LAYER, N_HEAD, N_EMBD).to(
+        device
+    )
     if wrap_ddp:
         model = DDP(model, device_ids=[rank])
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
@@ -203,7 +221,9 @@ def _train_and_get_state(rank, world_size, device, holder, wrap_ddp):
 
     if rank == 0:
         underlying = model.module if hasattr(model, "module") else model
-        holder["state"] = {k: v.detach().cpu() for k, v in underlying.state_dict().items()}
+        holder["state"] = {
+            k: v.detach().cpu() for k, v in underlying.state_dict().items()
+        }
 
     if world_size > 1:
         dist.destroy_process_group()
@@ -211,7 +231,9 @@ def _train_and_get_state(rank, world_size, device, holder, wrap_ddp):
 
 def _correctness_spawn_entry(rank, world_size, holder):
     local_holder = {}
-    _train_and_get_state(rank, world_size, torch.device(f"cuda:{rank}"), local_holder, wrap_ddp=True)
+    _train_and_get_state(
+        rank, world_size, torch.device(f"cuda:{rank}"), local_holder, wrap_ddp=True
+    )
     if rank == 0:
         holder["state"] = local_holder["state"]
 
@@ -246,7 +268,12 @@ def run_gpu_correctness_check():
 # ---------------------------------------------------------------------------
 
 
-def _run_parallel_config(rank, world_size, use_fsdp, holder):
+def _count_params(n_layer, n_head, n_embd, vocab_size, block_size):
+    m = TinyGPT(vocab_size, block_size, n_layer, n_head, n_embd)
+    return sum(p.numel() for p in m.parameters())
+
+
+def _run_parallel_config(rank, world_size, use_fsdp, model_cfg, holder):
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29602"
     os.environ["RANK"] = str(rank)
@@ -259,10 +286,19 @@ def _run_parallel_config(rank, world_size, use_fsdp, holder):
     torch.manual_seed(SEED)
     tokenizer, data = _load_data()
 
-    model = TinyGPT(tokenizer.vocab_size, BLOCK_SIZE, N_LAYER, N_HEAD, N_EMBD).to(device)
+    n_layer, n_head, n_embd = (
+        model_cfg["n_layer"],
+        model_cfg["n_head"],
+        model_cfg["n_embd"],
+    )
+    total_batch_size = model_cfg["total_batch_size"]
+
+    model = TinyGPT(tokenizer.vocab_size, BLOCK_SIZE, n_layer, n_head, n_embd).to(
+        device
+    )
     model = FSDP(model) if use_fsdp else DDP(model, device_ids=[rank])
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    batch_iter = make_batch_iter(data, BLOCK_SIZE, TOTAL_BATCH_SIZE, seed=SEED)
+    batch_iter = make_batch_iter(data, BLOCK_SIZE, total_batch_size, seed=SEED)
 
     def step(i):
         x, y = batch_iter(i, rank, world_size)
@@ -285,34 +321,55 @@ def _run_parallel_config(rank, world_size, use_fsdp, holder):
     elapsed = time.perf_counter() - start
 
     if rank == 0:
-        samples_per_sec = (STEPS * TOTAL_BATCH_SIZE) / elapsed
+        samples_per_sec = (STEPS * total_batch_size) / elapsed
         holder["result"] = {
             "parallelism": "fsdp" if use_fsdp else "ddp",
             "elapsed_seconds": round(elapsed, 3),
             "samples_per_sec": round(samples_per_sec, 1),
-            "peak_cuda_memory_mb": round(torch.cuda.max_memory_allocated(device) / 1e6, 1),
+            "peak_cuda_memory_mb": round(
+                torch.cuda.max_memory_allocated(device) / 1e6, 1
+            ),
         }
 
     dist.destroy_process_group()
 
 
 def run_fsdp_vs_ddp():
-    results = []
-    for use_fsdp in [False, True]:
-        manager = mp.Manager()
-        holder = manager.dict()
-        mp.spawn(_run_parallel_config, args=(2, use_fsdp, holder), nprocs=2, join=True)
-        result = dict(holder["result"])
-        print(json.dumps(result, indent=2))
-        results.append(result)
-    return results
+    all_results = {}
+    for label, model_cfg in MODEL_CONFIGS.items():
+        num_params = _count_params(
+            model_cfg["n_layer"],
+            model_cfg["n_head"],
+            model_cfg["n_embd"],
+            65,
+            BLOCK_SIZE,
+        )
+        print(f"\n--- model config {label} (~{num_params / 1e6:.1f}M params) ---")
+        results = []
+        for use_fsdp in [False, True]:
+            manager = mp.Manager()
+            holder = manager.dict()
+            mp.spawn(
+                _run_parallel_config,
+                args=(2, use_fsdp, model_cfg, holder),
+                nprocs=2,
+                join=True,
+            )
+            result = dict(holder["result"])
+            result["num_params_approx"] = num_params
+            print(json.dumps(result, indent=2))
+            results.append(result)
+        all_results[label] = results
+    return all_results
 
 
 def main():
     n_gpus = torch.cuda.device_count()
     print(f"CUDA devices available: {n_gpus}")
     if n_gpus < 2:
-        print("Need >=2 GPUs for this kernel; skipping (see benchmark_kernel.py for 1-GPU results).")
+        print(
+            "Need >=2 GPUs for this kernel; skipping (see benchmark_kernel.py for 1-GPU results)."
+        )
         return
 
     print("\n=== Part 1: GPU correctness (DDP vs single-process, NCCL) ===")

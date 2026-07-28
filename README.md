@@ -116,22 +116,28 @@ difference. Same invariant as `tests/test_correctness.py`, now verified on the
 actual backend (NCCL) and hardware (GPU) real training uses, not just the
 portable CPU stand-in.
 
-**FSDP vs. DDP** (2 GPUs, AdamW, no AMP/checkpointing, 30 steps):
+**FSDP vs. DDP, at two model sizes** (2 GPUs, AdamW, no AMP/checkpointing, 30 steps)
+-- run at both the ~11M-param config used everywhere else in this repo, and a
+~303M-param config (24 layers, 1024 dim -- as large as comfortably fits DDP's
+full-replica memory on a single 16GB T4), to see the *trend*, not just one
+data point:
 
-| Parallelism | Samples/sec | Peak memory (MB) |
-|---|---:|---:|
-| DDP | 666.3 | 919.0 |
-| FSDP | 648.4 | **852.5** |
+| Params | Parallelism | Samples/sec | Peak memory (MB) |
+|---:|---|---:|---:|
+| 10.7M | DDP | 675.2 | 919.0 |
+| 10.7M | FSDP | 641.1 | **852.5** (-7.2%) |
+| 302.6M | DDP | 27.9 | 8,561.7 |
+| 302.6M | FSDP | 21.1 | **6,748.1** (-21.2%) |
 
-FSDP used **7.2% less peak memory** than DDP for **2.7% less throughput** (the
-cost of the extra all-gather to reconstruct full parameters on the fly). That's
-a real but modest difference at this model's size (~11M params) -- FSDP's
-memory advantage comes from *not* replicating optimizer state (2x the
-parameter count for AdamW's momentum + variance) on every rank, which only
-becomes a large fraction of peak memory once the model itself is big enough
-that optimizer state, not activations, dominates. At 11M params it's already
-measurable; at the scale DDP actually stops fitting on a single GPU, the same
-mechanism is why FSDP (or ZeRO) is the default choice instead.
+Scaling the model ~28x turned FSDP's memory advantage from a modest 7.2% into
+a real 21.2% -- confirming the mechanism (FSDP shards optimizer state instead
+of replicating it, and optimizer state is a bigger fraction of memory as the
+model grows). But the throughput cost grew too, from 5.1% to 24.4%: FSDP has
+to all-gather the full parameters back together for every forward/backward,
+and that communication cost scales with model size just like the memory
+savings do. This is the honest trade, not a free lunch -- FSDP wins on models
+too big for DDP to fit at all, not universally. (~303M params is still far
+below what "large model" means in the industry -- see limitations below.)
 
 ## A real bug found along the way
 
@@ -170,12 +176,14 @@ running on Kaggle, in case they save someone else the debugging time:
 - **Checkpointing assumes shared storage** (all ranks read the same path),
   true for a single machine or multi-node with a shared filesystem (NFS,
   etc.) -- the common real-world setup, but worth stating explicitly.
-- **Still single-node (2 GPUs, 1 machine) and a small model (~11M params).**
-  This demonstrates the mechanics and the direction/magnitude of each
-  optimization correctly, but the specific numbers -- including the modest
-  7.2% FSDP memory win -- won't generalize as-is to multi-node training or to
-  much larger models, where FSDP's advantage over DDP grows substantially
-  (see "GPU correctness, and FSDP vs. DDP" above).
+- **Still single-node (2 GPUs, 1 machine), and "big" here means ~303M params**,
+  the most that comfortably fits DDP's full-replica memory on a single 16GB
+  T4 -- nowhere close to an industry "large model" (billions of params,
+  many nodes). The 11M -> 303M comparison shows the *direction* of the FSDP
+  memory/throughput trade correctly (see "GPU correctness, and FSDP vs. DDP"
+  above), but the specific percentages will keep shifting at real large-model
+  scale, and multi-node effects (network topology, cross-node all-gather
+  latency) aren't represented here at all.
 - **FSDP checkpointing isn't implemented.** `dist_trainer/checkpoint.py`
   assumes a plain or DDP-wrapped model's `state_dict()`; FSDP's is sharded
   by default and needs an explicit `state_dict_type` context to gather a
