@@ -25,6 +25,8 @@ class Trainer:
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         device: torch.device | None = None,
+        use_amp: bool = False,
+        amp_dtype: torch.dtype = torch.float16,
     ):
         self.rank = int(os.environ.get("RANK", "0"))
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -34,6 +36,14 @@ class Trainer:
         self.optimizer = optimizer
         self.step = 0
         self._is_setup = False
+
+        # AMP only actually helps (and only avoids gradient underflow risk
+        # via the scaler) on CUDA; on CPU we silently no-op so the same
+        # training script is safe to run on a laptop for the mechanics/
+        # correctness tests and on a real GPU for the perf benchmark.
+        self.use_amp = use_amp and self.device.type == "cuda"
+        self.amp_dtype = amp_dtype
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
     def setup(self, backend: str = "gloo") -> None:
         if self.distributed:
@@ -54,10 +64,20 @@ class Trainer:
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         self.optimizer.zero_grad()
-        pred = self.model(x)
-        loss = loss_fn(pred, y)
-        loss.backward()
-        self.optimizer.step()
+
+        if self.use_amp:
+            with torch.autocast(device_type="cuda", dtype=self.amp_dtype):
+                pred = self.model(x)
+                loss = loss_fn(pred, y)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            pred = self.model(x)
+            loss = loss_fn(pred, y)
+            loss.backward()
+            self.optimizer.step()
+
         self.step += 1
         return loss.item()
 

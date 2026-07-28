@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .test_tmp/
 *.pt
+.cache/
+kaggle_kernel/output/

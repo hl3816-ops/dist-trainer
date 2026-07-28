@@ -1,0 +1,15 @@
+{
+  "id": "nick999888/dist-trainer-tinygpt-throughput-benchmark",
+  "title": "dist-trainer TinyGPT throughput benchmark",
+  "code_file": "benchmark_kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

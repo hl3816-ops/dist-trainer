@@ -1,10 +1,10 @@
 # dist-trainer
 
-A small, reusable distributed-training library, built to demonstrate (at CPU/
-laptop scale, with real `torch.distributed` mechanics) the core capabilities
-a training-infrastructure role actually needs day to day: correct
-distributed gradient sync, a reusable framework rather than one-off scripts,
-and fault tolerance under process failure.
+A small, reusable distributed-training library, built to demonstrate the
+core capabilities a training-infrastructure role actually needs day to day:
+correct distributed gradient sync, a reusable framework rather than one-off
+scripts, fault tolerance under process failure, and real GPU performance
+optimization -- backed by measurements on real 2x T4 GPUs, not just claims.
 
 ## Why this exists
 
@@ -13,21 +13,27 @@ Four capabilities, four pieces of concrete evidence:
 | Capability | Where it's proven |
 |---|---|
 | Distributed training that's actually correct, not just "runs" | [`tests/test_correctness.py`](tests/test_correctness.py) -- 4-process DDP vs. single-process baseline, final weights match to **5.96e-08** |
-| Reusable framework, not a one-off script | [`dist_trainer/trainer.py`](dist_trainer/trainer.py) -- domain-agnostic `Trainer`; the example task in `examples/` is ~60 lines that just plugs into it |
+| Reusable framework, not a one-off script | [`dist_trainer/trainer.py`](dist_trainer/trainer.py) -- domain-agnostic `Trainer` (DDP, AMP, checkpointing); both the toy-MLP and the transformer example plug into the same ~150-line class |
 | Reliability under failure ("robust under rapid iteration") | [`tests/test_fault_tolerance.py`](tests/test_fault_tolerance.py) -- kill the process mid-training, resume from checkpoint, **zero** loss trajectory divergence (0.00e+00) vs. an uninterrupted run |
-| Debugging real distributed-systems infrastructure, not just model code | Found and worked around a real bug in `torchrun`'s Windows rendezvous bootstrap (see "A real bug found along the way" below) |
+| High-performance optimization (real GPU numbers) | [`kaggle_kernel/benchmark_kernel.py`](kaggle_kernel/benchmark_kernel.py), run on real 2x T4 GPUs -- mixed precision: **2.6x** throughput; gradient checkpointing: **68% less** peak memory; 2 GPUs vs 1: **1.79x** throughput. See "Real GPU benchmark results" below. |
 
 ## Architecture
 
 ```
 dist_trainer/            <- the reusable library (domain-agnostic)
-  trainer.py                Trainer: DDP setup/teardown, train_step, checkpoint hooks
+  trainer.py                Trainer: DDP setup/teardown, train_step (+AMP), checkpoint hooks
   checkpoint.py              atomic checkpoint save/load (model + optimizer + RNG state)
 
-examples/                <- a concrete task plugged into the library
-  task.py                    tiny synthetic regression MLP + deterministic data
-  train.py                   CLI entrypoint; identical code path whether run
-                              single-process or multi-process
+examples/
+  task.py, train.py          toy regression MLP -- used by the correctness/fault-tolerance tests
+  gpt_model.py                minimal decoder-only transformer (causal self-attention,
+                              optional gradient checkpointing per block)
+  gpt_data.py                  character-level tiny-shakespeare data loading
+  benchmark_gpt.py            throughput/memory benchmark CLI (single or multi-GPU via torchrun)
+
+kaggle_kernel/            <- self-contained script + metadata to run the same
+  benchmark_kernel.py        benchmark on real Kaggle GPUs (inlines model/data/
+  kernel-metadata.json       training code so the push is a single self-sufficient file)
 
 tests/
   test_correctness.py        DDP vs. single-process weight equivalence check
@@ -56,7 +62,43 @@ python examples/train.py --steps 200 --checkpoint-dir ckpts --checkpoint-every 2
 # run the two correctness proofs
 python tests/test_correctness.py
 python tests/test_fault_tolerance.py
+
+# throughput/memory benchmark (needs a real CUDA GPU; runs but is meaningless on CPU)
+python examples/benchmark_gpt.py --use-amp --use-grad-checkpoint --results-out bench.json
+torchrun --nproc_per_node=2 examples/benchmark_gpt.py --use-amp --results-out bench_2gpu.json
 ```
+
+## Real GPU benchmark results
+
+Run on a Kaggle notebook with 2x NVIDIA T4 GPUs (`kaggle_kernel/benchmark_kernel.py`,
+6-layer/384-dim TinyGPT, batch size 64, block size 128, 40 measured steps after
+10 warmup steps):
+
+| GPUs | Mixed precision | Grad checkpoint | Samples/sec | Tokens/sec | Peak memory (MB) |
+|-----:|:---:|:---:|-----:|-----:|-----:|
+| 1 | | | 368.0 | 47,110 | 1,597.6 |
+| 1 | | Y | 289.4 | 37,048 | **506.3** |
+| 1 | Y | | **952.2** | **121,884** | 1,150.3 |
+| 1 | Y | Y | 751.8 | 96,230 | 414.7 |
+| 2 | | | 658.6 | 84,298 | 963.7 |
+| 2 | | Y | 528.8 | 67,681 | 417.7 |
+| 2 | Y | | 1,475.3 | 188,839 | 714.0 |
+| 2 | Y | Y | 1,189.1 | 152,202 | **341.1** |
+
+Reading the table:
+- **Mixed precision (1 GPU): 2.6x throughput** (368 -> 952 samples/sec) *and* lower
+  peak memory (1,598MB -> 1,150MB) -- fp16 activations are smaller, and T4's tensor
+  cores are built for fp16 matmuls, so this is close to a pure win here.
+- **Gradient checkpointing (1 GPU, no AMP): 68% less peak memory** (1,598MB -> 506MB)
+  for a 21% throughput cost (recomputing activations during backward instead of
+  storing them) -- the classic compute-for-memory trade, useful when memory (not
+  compute) is the constraint on a bigger model.
+- **2 GPUs vs. 1 (no AMP/checkpoint): 1.79x throughput**, not a clean 2x --
+  gradient all-reduce communication overhead, as expected, not a bug.
+- **Stacking everything (2 GPU + AMP + grad checkpoint): 341.1MB peak memory**
+  (79% less than the 1-GPU unoptimized baseline) while still running **3.2x**
+  faster than that baseline -- the useful combination when memory is the binding
+  constraint and you still want throughput back via more GPUs.
 
 ## A real bug found along the way
 
@@ -73,16 +115,20 @@ itself, which routes through the one `TCPStore` construction path in
 rather than fixing torch itself. (`torchrun` works normally on Linux/GPU
 hosts, e.g. Kaggle -- this is specific to this Windows CPU wheel.)
 
+Two more platform-specific gotchas hit while getting the GPU benchmark
+running on Kaggle, in case they save someone else the debugging time:
+- `torch.cuda.is_available()` was `False` and every CUDA call failed on the
+  first two kernel runs despite the account showing 30 GPU-hours of quota --
+  Kaggle gates *using* GPU sessions behind phone verification separately
+  from just having quota allocated to the account.
+- `kaggle kernels push` on an update (not first creation) 409s if the
+  `kernel-metadata.json` `id` field's slug doesn't exactly match the slug
+  Kaggle actually derived from the kernel's title on creation -- the fix is
+  making `id` match the real slug from the kernel's URL, not the slug you
+  intended.
+
 ## Design choices / limitations
 
-- **CPU-only, `gloo` backend, single machine.** This proves the distributed
-  *mechanics* (process groups, DDP gradient averaging, multi-process
-  coordination, checkpoint/resume) are correctly implemented -- it does not
-  demonstrate GPU throughput/memory optimization (mixed precision, NCCL,
-  multi-node scaling), which needs actual GPU hardware. A natural follow-up
-  is running the same `Trainer` on a multi-GPU host (e.g. Kaggle's free
-  2x T4) with `backend="nccl"` and profiling throughput before/after
-  optimizations like mixed precision and gradient checkpointing.
 - **Correctness check compares final weights, not losses**, because each
   rank's `loss.item()` is only over its own shard of the batch and will
   legitimately differ step-to-step from a single-process full-batch loss
@@ -91,3 +137,10 @@ hosts, e.g. Kaggle -- this is specific to this Windows CPU wheel.)
 - **Checkpointing assumes shared storage** (all ranks read the same path),
   true for a single machine or multi-node with a shared filesystem (NFS,
   etc.) -- the common real-world setup, but worth stating explicitly.
+- **Still single-node (2 GPUs, 1 machine) and a small model (~11M params).**
+  This demonstrates the mechanics and the direction/magnitude of each
+  optimization correctly, but the specific numbers won't generalize to
+  multi-node training or to models where activation memory, not the model
+  itself, dominates -- that's where sharding techniques like FSDP/ZeRO
+  (not implemented here) start to matter more than DDP + gradient
+  checkpointing.
