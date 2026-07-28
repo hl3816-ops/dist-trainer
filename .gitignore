@@ -7,3 +7,4 @@ __pycache__/
 kaggle_kernel/output/
 kaggle_kernel/gpu_extras/output/
 kaggle_kernel/profiling/output/
+.ssh_runpod/
