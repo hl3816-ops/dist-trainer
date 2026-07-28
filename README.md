@@ -257,8 +257,7 @@ leaving it implicit.
 ## Scaling beyond one node
 
 Everything above was measured on a single machine. [`MULTI_NODE_DESIGN.md`](MULTI_NODE_DESIGN.md)
-is a technical design document (not a validated result -- no multi-node
-hardware was available to test on) covering what would actually have to
+is a technical design document covering what would actually have to
 change: rendezvous/launcher config across real hosts, NCCL transport
 selection and why intra- vs. inter-node bandwidth asymmetry is the real
 scaling bottleneck, gradient bucketing/overlap tuning, fault recovery when
@@ -266,6 +265,38 @@ node failure stops being an edge case, and sharded/async checkpointing and
 streaming data loading at a scale where this repo's simplifications
 (single-file synchronous checkpoints, one small in-memory dataset) stop
 being fine.
+
+**A real 2-node attempt, and why it's still blocked on infra rather than
+code.** I rented two separate RunPod GPU instances (not two processes on
+one machine) specifically to validate `dist.init_process_group` across a
+real network boundary, and hit -- then precisely root-caused -- a platform
+networking limitation rather than getting a clean pass:
+
+- Cloud GPU providers like RunPod expose only the SSH port between
+  separate pods; there's no shared private network reachable between two
+  instances by default.
+- An SSH local/remote port-forward tunnel (`-L`/`-R`) successfully bridged
+  the rendezvous handshake (`TCPStore` on the fixed `MASTER_PORT`) -- the
+  two ranks *could* find each other.
+- But `gloo`'s actual data-channel step (`connectFullMesh`) doesn't reuse
+  that address: each rank auto-detects and advertises its own
+  container-internal IP (e.g. `172.21.0.2`), and the other rank tries to
+  connect directly to it on a dynamically chosen port. That address only
+  exists inside the originating pod's private Docker network, so the
+  connection times out -- confirmed by reading the exact IP:port gloo
+  logged in the `connectFullMesh` failure.
+- The general fix for arbitrary-port cross-host routing is a transparent
+  VPN-style tunnel (tried `sshuttle`), but that requires `CAP_NET_ADMIN`
+  inside the container to install NAT/firewall rules, which RunPod's
+  containers explicitly strip (confirmed via `/proc/self/status`'s
+  capability bounding set) -- not something fixable from inside the
+  container at any privilege level available to a renter.
+
+So the rendezvous half of real multi-node coordination is validated
+end-to-end; the full-mesh data-plane half is blocked by the specific cloud
+provider's container networking, not by anything in this library. The
+fix would be a provider with real inter-node private networking (e.g. a
+proper VPC/cluster product), not more debugging inside these containers.
 
 ## A real bug found along the way
 
