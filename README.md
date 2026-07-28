@@ -2,44 +2,58 @@
 
 A small, reusable distributed-training library, built to demonstrate the
 core capabilities a training-infrastructure role actually needs day to day:
-correct distributed gradient sync, a reusable framework rather than one-off
-scripts, fault tolerance under process failure, and real GPU performance
-optimization -- backed by measurements on real 2x T4 GPUs, not just claims.
+correct distributed gradient sync (data-parallel *and* tensor-parallel),
+a reusable framework rather than one-off scripts, fault tolerance that
+recovers on its own rather than needing a human to notice, and real GPU
+performance optimization -- backed by measurements on real 2x T4 GPUs, not
+just claims.
 
 ## Why this exists
 
-Four capabilities, four pieces of concrete evidence:
-
 | Capability | Where it's proven |
 |---|---|
-| Distributed training that's actually correct, not just "runs" | [`tests/test_correctness.py`](tests/test_correctness.py) -- 4-process DDP vs. single-process baseline (CPU/gloo), final weights match to **5.96e-08**; re-verified on real 2x T4 GPUs (NCCL) at **1.19e-07**, see below |
+| Distributed training that's actually correct, not just "runs" | [`tests/test_correctness.py`](tests/test_correctness.py) -- 4-process DDP vs. single-process baseline (CPU/gloo), final weights match to **5.96e-08**; re-verified on real 2x T4 GPUs (NCCL) at **1.19e-07** |
+| ...and not just data parallelism | [`tests/test_tensor_parallel_correctness.py`](tests/test_tensor_parallel_correctness.py) -- a Megatron-LM-style tensor-parallel MLP (splits individual layers, not just data, across ranks) matches a full-size reference to **1.79e-07** |
+| ...and not just one framework | [`tests/test_jax_correctness.py`](tests/test_jax_correctness.py) -- the same data-parallel correctness invariant, in JAX via `jax.pmap`/`jax.lax.pmean` instead of PyTorch DDP, matches to **5.96e-08** |
 | Reusable framework, not a one-off script | [`dist_trainer/trainer.py`](dist_trainer/trainer.py) -- domain-agnostic `Trainer` (DDP or FSDP, AMP, checkpointing); both the toy-MLP and the transformer example plug into the same ~170-line class |
-| Reliability under failure ("robust under rapid iteration") | [`tests/test_fault_tolerance.py`](tests/test_fault_tolerance.py) -- kill the process mid-training, resume from checkpoint, **zero** loss trajectory divergence (0.00e+00) vs. an uninterrupted run |
-| High-performance optimization (real GPU numbers) | [`kaggle_kernel/benchmark_kernel.py`](kaggle_kernel/benchmark_kernel.py), run on real 2x T4 GPUs -- mixed precision: **2.6x** throughput; gradient checkpointing: **68% less** peak memory; 2 GPUs vs 1: **1.79x** throughput. See "Real GPU benchmark results" below. |
+| Reliability that's *automatic*, not just correct | [`tests/test_fault_tolerance.py`](tests/test_fault_tolerance.py) proves checkpoint/resume itself is exact (0.00e+00 divergence); [`tests/test_elastic_recovery.py`](tests/test_elastic_recovery.py) proves the *detection and restart* is automatic too -- a crashed worker is noticed and the whole group is relaunched with zero external intervention, matching an uninterrupted baseline exactly |
+| High-performance optimization (real GPU numbers) | [`kaggle_kernel/benchmark_kernel.py`](kaggle_kernel/benchmark_kernel.py), run on real 2x T4 GPUs -- mixed precision: **2.6x** throughput; gradient checkpointing: **68% less** peak memory; 2 GPUs vs 1: **1.79x** throughput |
 
 ## Architecture
 
 ```
-dist_trainer/            <- the reusable library (domain-agnostic)
-  trainer.py                Trainer: DDP setup/teardown, train_step (+AMP), checkpoint hooks
+dist_trainer/            <- the reusable PyTorch library (domain-agnostic)
+  trainer.py                Trainer: DDP/FSDP setup+teardown, train_step (+AMP), checkpoint hooks
   checkpoint.py              atomic checkpoint save/load (model + optimizer + RNG state)
+  tensor_parallel.py         ColumnParallelLinear / RowParallelLinear / TensorParallelMLP
+  supervisor.py               run_with_auto_restart: detect a crashed worker, restart the group
 
 examples/
-  task.py, train.py          toy regression MLP -- used by the correctness/fault-tolerance tests
+  task.py, train.py          toy regression MLP -- used by the correctness/fault-tolerance/
+                              elastic-recovery tests
+  tp_worker.py                worker script for the tensor-parallel correctness test
   gpt_model.py                minimal decoder-only transformer (causal self-attention,
                               optional gradient checkpointing per block)
   gpt_data.py                  character-level tiny-shakespeare data loading
   benchmark_gpt.py            throughput/memory benchmark CLI (single or multi-GPU via torchrun)
 
+examples_jax/             <- cross-framework counterpart: same data-parallel correctness
+  model.py, train.py         invariant, in JAX (jax.pmap + jax.lax.pmean) instead of PyTorch
+
 kaggle_kernel/            <- self-contained scripts + metadata to run on real Kaggle GPUs
   benchmark_kernel.py         AMP / grad-checkpoint throughput+memory matrix (1 & 2 GPU)
   gpu_extras/
     gpu_extras_kernel.py       DDP-vs-single-process correctness on NCCL, and FSDP vs DDP
+  profiling/
+    profile_kernel.py          torch.profiler trace: which NCCL kernels DDP/FSDP actually call
   (each inlines its own model/data/training code so the push is one self-sufficient file)
 
 tests/
-  test_correctness.py        DDP vs. single-process weight equivalence check
-  test_fault_tolerance.py    crash + resume vs. continuous-run equivalence check
+  test_correctness.py                    DDP vs. single-process weight equivalence
+  test_tensor_parallel_correctness.py    tensor-parallel MLP vs. a full-size reference
+  test_jax_correctness.py                 jax.pmap vs. single-device JAX training
+  test_fault_tolerance.py                crash + resume vs. continuous-run equivalence
+  test_elastic_recovery.py                automatic crash detection + group restart
 ```
 
 The `Trainer` reads `RANK` / `WORLD_SIZE` from the environment and only
@@ -65,9 +79,14 @@ torchrun --nproc_per_node=4 examples/train.py --steps 200
 # with checkpointing (survives being killed and restarted)
 python examples/train.py --steps 200 --checkpoint-dir ckpts --checkpoint-every 20
 
-# run the two correctness proofs
+# run the correctness / fault-tolerance proofs (all CPU-only, no GPU needed)
 python tests/test_correctness.py
+python tests/test_tensor_parallel_correctness.py
 python tests/test_fault_tolerance.py
+python tests/test_elastic_recovery.py
+
+# JAX cross-framework correctness proof (separate deps: pip install -r examples_jax/requirements.txt)
+python tests/test_jax_correctness.py
 
 # throughput/memory benchmark (needs a real CUDA GPU; runs but is meaningless on CPU)
 python examples/benchmark_gpt.py --use-amp --use-grad-checkpoint --results-out bench.json
@@ -138,6 +157,69 @@ and that communication cost scales with model size just like the memory
 savings do. This is the honest trade, not a free lunch -- FSDP wins on models
 too big for DDP to fit at all, not universally. (~303M params is still far
 below what "large model" means in the industry -- see limitations below.)
+
+## Tensor parallelism: splitting layers, not just data
+
+DDP and FSDP are both *data*-parallel: every rank runs the same full layer,
+just on different data (DDP) or with different shards of that layer's state
+at rest (FSDP). Neither helps if a single layer's activations don't fit on
+one GPU at all -- that's what tensor parallelism is for, and it's a
+different technique, not a bigger version of the same one.
+
+[`dist_trainer/tensor_parallel.py`](dist_trainer/tensor_parallel.py) implements
+the standard Megatron-LM MLP pattern: `ColumnParallelLinear` splits a layer's
+*output* features across ranks (no communication needed -- each rank just
+computes its own disjoint slice), feeding directly into `RowParallelLinear`,
+which splits its *input* features to match and all-reduces the partial sums
+back together. The column/row split is chosen specifically so the
+intermediate activation between the two layers never needs to be gathered --
+exactly one all-reduce per MLP block, regardless of how many ranks.
+
+`tests/test_tensor_parallel_correctness.py` proves it against a full-size
+reference MLP with the same weights sharded across 2 ranks: max abs output
+difference **1.79e-07** (CPU/gloo, same subprocess-launch pattern as
+`test_correctness.py`, no GPU needed for the correctness proof itself).
+
+## Automatic fault recovery: noticing failure, not just surviving it
+
+`test_fault_tolerance.py` (above) proves checkpoint/resume is *exact* --
+resuming really does pick up where training left off. It doesn't prove
+anything notices a crash in the first place; that test's "resume" is
+triggered by a human (or a script standing in for one) re-invoking the
+command.
+
+[`dist_trainer/supervisor.py`](dist_trainer/supervisor.py)'s
+`run_with_auto_restart` closes that gap: it launches a process group,
+monitors it, and if *any* rank exits non-zero, kills the rest of that
+generation and relaunches the whole group itself -- up to a configurable
+number of attempts. (Restarting the *whole* group rather than hot-replacing
+the one dead rank is deliberate: NCCL/gloo process groups don't support
+that, so a clean full restart picking back up from the last shared
+checkpoint is the actual production pattern, not a simplification.)
+
+`tests/test_elastic_recovery.py` proves the combination end to end: a
+2-rank group where rank 1 is configured to crash partway through is
+auto-detected, the whole group is killed and relaunched with **zero**
+external intervention, and the recovered run's loss trajectory matches a
+continuous (never-crashed) 2-rank baseline **exactly** (0.00e+00 diff).
+
+## Cross-framework: the same invariant, in JAX
+
+The JD this project targets lists "PyTorch, JAX" together, so
+[`examples_jax/`](examples_jax/) proves the same core claim --
+distributed data-parallel training reproduces single-device training --
+using JAX's actual idioms instead of a PyTorch-shaped imitation: explicit
+parameter pytrees (no stateful `nn.Module`), `jax.pmap` to compile the
+training step once and run it in parallel across devices, and
+`jax.lax.pmean` inside the pmapped function as JAX's equivalent of DDP's
+gradient all-reduce. Devices are simulated on CPU via
+`XLA_FLAGS=--xla_force_host_platform_device_count=N` (set in
+[`examples_jax/train.py`](examples_jax/train.py)), so -- like the tensor-parallel and
+elastic-recovery proofs -- this needs no GPU to demonstrate the real
+multi-device mechanics.
+
+`tests/test_jax_correctness.py`: 4-simulated-device `pmap` training vs.
+single-device, max abs parameter difference **5.96e-08**.
 
 ## What's actually inside that communication cost: a profiler trace
 
@@ -234,3 +316,17 @@ running on Kaggle, in case they save someone else the debugging time:
   assumes a plain or DDP-wrapped model's `state_dict()`; FSDP's is sharded
   by default and needs an explicit `state_dict_type` context to gather a
   full checkpoint, which this library doesn't do yet.
+- **Tensor parallelism covers one MLP block**, not a full transformer (the
+  attention layer, and combining tensor parallelism with DDP/FSDP the way
+  real 3D-parallel training does, aren't implemented) -- enough to prove
+  the column/row-split mechanism is correctly implemented and verified,
+  not a drop-in replacement for `examples/gpt_model.py`'s attention blocks.
+- **Elastic recovery is single-node.** `dist_trainer/supervisor.py` restarts
+  local subprocesses; it doesn't handle a node itself disappearing (vs. one
+  process on it crashing), which needs an external scheduler (Slurm,
+  Kubernetes) -- see `MULTI_NODE_DESIGN.md`'s fault-recovery section for
+  what that actually requires.
+- **The JAX demo is data-parallel only** (`jax.pmap`), the direct JAX
+  counterpart to the PyTorch DDP proof -- it doesn't cover JAX's
+  `jax.sharding`/GSPMD APIs, which are JAX's answer to FSDP/tensor
+  parallelism-style sharding.
